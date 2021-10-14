@@ -55,8 +55,17 @@ public:
     {
         struct node
         {
+            struct header;
+            struct launder{};
+
             constexpr node() = default;
-            constexpr explicit node(std::size_t size) : m_size(size)
+            constexpr explicit node(std::size_t size)
+            {
+                m_header.m_size = size;
+            }
+
+            explicit node(const header & header, launder) :
+                m_header(header, launder{})
             {
             }
 
@@ -65,6 +74,11 @@ public:
             node & operator=(node &&) = delete;
             node & operator=(const node &) = delete;
             ~node() = default;
+
+            static node * assume_free(header * p)
+            {
+                return reinterpret_cast<node *>(p);
+            }
 
             std::byte * address() noexcept
             {
@@ -78,12 +92,12 @@ public:
 
             std::size_t size() const noexcept
             {
-                return m_size & ~std::size_t(0x1);
+                return m_header.size();
             }
 
-            node * next() const noexcept
+            header * next() const noexcept
             {
-                return m_next;
+                return m_header.m_next;
             }
 
             node * next_free() const noexcept
@@ -91,9 +105,9 @@ public:
                 return m_next_free;
             }
 
-            node * prev() const noexcept
+            header * prev() const noexcept
             {
-                return m_prev;
+                return m_header.m_prev;
             }
 
             node * prev_free() const noexcept
@@ -103,23 +117,33 @@ public:
 
             void append_to_list(node * p) noexcept
             {
+                append_to_list(&p->m_header);
+            }
+
+            void append_to_list(header * p) noexcept
+            {
                 // Insert the node.
-                if (m_next) {
-                    m_next->m_prev = p;
+                if (m_header.m_next) {
+                    m_header.m_next->m_prev = p;
                 }
-                p->m_next = m_next;
-                p->m_prev = this;
-                m_next = p;
+                p->m_next = m_header.m_next;
+                p->m_prev = &m_header;
+                m_header.m_next = p;
             }
 
             void prepend_to_list(node * p) noexcept
             {
-                if (m_prev) {
-                    m_prev->m_next = p;
+                prepend_to_list(&p->m_header);
+            }
+
+            void prepend_to_list(header * p) noexcept
+            {
+                if (m_header.m_prev) {
+                    m_header.m_prev->m_next = p;
                 }
-                p->m_prev = m_prev;
-                p->m_next = this;
-                m_prev = p;
+                p->m_prev = m_header.m_prev;
+                p->m_next = &m_header;
+                m_header.m_prev = p;
             }
 
             void append_to_freelist(node * p) noexcept
@@ -148,12 +172,12 @@ public:
 
             node * unlink_from_list() noexcept
             {
-                if (m_prev) {
-                    m_prev->m_next = m_next;
+                if (m_header.m_prev) {
+                    m_header.m_prev->m_next = m_header.m_next;
                 }
 
-                if (m_next) {
-                    m_next->m_prev = m_prev;
+                if (m_header.m_next) {
+                    m_header.m_next->m_prev = m_header.m_prev;
                 }
 
                 return this;
@@ -176,12 +200,12 @@ public:
             node * split(std::size_t size) noexcept
             {
                 // Create new node.
-                node * tail = ::new (address() + size) node(m_size - size);
+                node * tail = ::new (address() + size) node(m_header.m_size - size);
                 append_to_list(tail);
                 append_to_freelist(tail);
 
                 // Shrink current node.
-                m_size = size;
+                m_header.m_size = size;
 
                 return tail;
             }
@@ -189,60 +213,42 @@ public:
             void merge_next() noexcept
             {
                 // Increase current size.
-                m_size += m_next_free->m_size;
+                m_header.m_size += m_next_free->m_header.m_size;
 
                 // Remove next from free list.
                 m_next_free->unlink_from_freelist();
 
                 // Remove node from complete list.
-                m_next->unlink_from_list();
+                assume_free(m_header.m_next)->unlink_from_list();
             }
 
             void merge() noexcept
             {
-                if (m_next_free &&
-                    address() + m_size == m_next_free->address()) {
+                if (m_next_free && address() + m_header.m_size ==
+                                       m_next_free->address()) {
                     merge_next();
                 }
 
-                if (m_prev_free &&
-                    m_prev_free->address() + m_prev_free->m_size ==
-                        address()) {
+                if (m_prev_free && m_prev_free->address() +
+                                           m_prev_free->m_header.m_size ==
+                                       address()) {
                     m_prev_free->merge_next();
                 }
             }
 
-            std::byte * data() noexcept
-            {
-                return std::launder(reinterpret_cast<std::byte *>(
-                    std::addressof(m_next_free)));
-            }
-
-            static node * from_data(std::byte * data) noexcept
-            {
-                return std::launder(reinterpret_cast<node *>(
-                    data - offsetof(node, m_next_free)));
-            }
-
-            static const node * from_data(const std::byte * data) noexcept
-            {
-                return std::launder(reinterpret_cast<const node *>(
-                    data - offsetof(node, m_next_free)));
-            }
-
             bool is_free() const noexcept
             {
-                return !(m_size & 0x1);
+                return m_header.is_free();
             }
 
             void set_free() noexcept
             {
-                m_size &= ~std::size_t(0x1);
+                m_header.m_size &= ~std::size_t(0x1);
             }
 
             void set_allocated() noexcept
             {
-                m_size |= 0x1;
+                m_header.m_size |= 0x1;
             }
 
             constexpr static std::size_t
@@ -253,11 +259,59 @@ public:
                        size;
             }
 
-            alignas(2 > alignof(node *) ? 2
-                                        : alignof(node *)) node * m_next{};
-            node * m_prev{};
-            std::size_t m_size{};
-            alignas(std::max_align_t) node * m_next_free{};
+            struct header
+            {
+                header() = default;
+                header(const header & other, launder) :
+                    header(other)
+                {
+                    if (m_next) {
+                        m_next->m_prev = std::launder(m_next->m_prev);
+                    }
+
+                    if (m_prev) {
+                        m_prev->m_next = std::launder(m_prev->m_next);
+                    }
+                }
+
+                bool is_free() const noexcept
+                {
+                    return !(m_size & 0x1);
+                }
+
+                std::byte * data() noexcept
+                {
+                    return std::launder(
+                        reinterpret_cast<std::byte *>(this + 1));
+                }
+
+                std::size_t size() const noexcept
+                {
+                    return m_size & ~std::size_t(0x1);
+                }
+
+                std::size_t data_size() const noexcept
+                {
+                    return size() - sizeof(*this);
+                }
+
+                static auto from_data(std::byte * data) noexcept
+                {
+                    return std::launder(
+                        reinterpret_cast<header *>(data - sizeof(header)));
+                }
+
+                static auto from_data(const std::byte * data) noexcept
+                {
+                    return std::launder(reinterpret_cast<const header *>(
+                        data - sizeof(header)));
+                }
+
+                alignas(std::max_align_t) header * m_next{};
+                header * m_prev{};
+                std::size_t m_size{};
+            } m_header;
+            node * m_next_free{};
             node * m_prev_free{};
         };
 
@@ -287,11 +341,10 @@ public:
         list(const list &) = delete;
         list & operator=(const list &) = delete;
 
-        node * allocate(std::size_t size) const noexcept
+        node::header * allocate(std::size_t size) const noexcept
         {
-            // Node sizes include themselves, we can override
-            // m_next_free and m_prev_free in the allocation.
-            size += offsetof(node, m_next_free);
+            // Block sizes include the header.
+            size += sizeof(node::header);
 
             // Make sure we only allocate properly aligned data.
             size += node::alignment(size);
@@ -319,27 +372,32 @@ public:
 
                 // Count allocation.
                 m_allocated += p->size();
-                return p;
+
+                // Replace the full node with a header.
+                auto header = p->m_header;
+                return ::new (static_cast<void *>(p))
+                    node::header(header, node::launder{});
             }
 
             return nullptr;
         }
 
-        void deallocate(node * node, std::size_t) const noexcept
+        void deallocate(node::header * h, std::size_t) const noexcept
         {
-            // Bring back the free list pointers.
-            ::new (&node->m_next_free) struct node *;
-            ::new (&node->m_prev_free) struct node *;
+            // Recreate the full node.
+            auto header = *h;
+            auto node = ::new (static_cast<void *>(h)) struct node(
+                header, node::launder{});
 
             // Count deallocation.
             m_allocated -= node->size();
 
             // Find first free node.
-            for (auto p = node->prev(); p; p = p->prev()) {
+            for (auto p = node->prev(); p; p = p->m_prev) {
                 if (!p->is_free()) {
                     continue;
                 }
-                p->append_to_freelist(node);
+                node::assume_free(p)->append_to_freelist(node);
                 return;
             }
 
@@ -353,10 +411,9 @@ public:
             m_first_free = node;
         }
 
-        std::size_t allocation_size(const node * node) const noexcept
+        std::size_t allocation_size(const node::header * header) const noexcept
         {
-            return (node->m_size & ~std::size_t(0x1)) -
-                   offsetof(struct node, m_next_free);
+            return header->data_size();
         }
 
         mutable node * m_first_free{};
@@ -377,11 +434,11 @@ public:
 
     std::byte * allocate(std::size_t size) const noexcept
     {
-        auto node = m_list.allocate(size);
-        if (!node) {
+        auto header = m_list.allocate(size);
+        if (!header) {
             return nullptr;
         }
-        return node->data();
+        return ::new(header->data()) std::byte[header->data_size()];
     }
 
     void deallocate(std::byte * pointer, std::size_t size) const noexcept
@@ -389,12 +446,12 @@ public:
         if (!pointer) {
             return;
         }
-        m_list.deallocate(list::node::from_data(pointer), size);
+        m_list.deallocate(list::node::header::from_data(pointer), size);
     }
 
     std::size_t allocation_size(const void * pointer) const noexcept
     {
-        return m_list.allocation_size(list::node::from_data(
+        return m_list.allocation_size(list::node::header::from_data(
             static_cast<const std::byte *>(pointer)));
     }
 
@@ -431,8 +488,8 @@ public:
 
     Type * allocate(std::size_t size) const noexcept
     {
-        return reinterpret_cast<Type *>(
-            m_allocator.allocate(sizeof(Type) * size));
+        return std::launder(reinterpret_cast<Type *>(
+            m_allocator.allocate(sizeof(Type) * size)));
     }
 
     void deallocate(Type * pointer, std::size_t size) const noexcept
@@ -486,8 +543,8 @@ public:
 
     Type * allocate(std::size_t size) noexcept
     {
-        return reinterpret_cast<Type *>(
-            Source::get_allocator().allocate(sizeof(Type) * size));
+        return std::launder(reinterpret_cast<Type *>(
+            Source::get_allocator().allocate(sizeof(Type) * size)));
     }
 
     void deallocate(Type * pointer, std::size_t size) noexcept
