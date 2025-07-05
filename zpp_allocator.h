@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <new>
+#include <memory>
 #include <type_traits>
 
 namespace zpp
